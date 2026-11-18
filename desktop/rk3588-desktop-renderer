@@ -1,0 +1,110 @@
+#!/bin/bash
+# Configure the next GDM/session start; never terminate a live desktop.
+# wayland: GDM + GNOME on Wayland, Mutter GLES2 via Mali GBM/Wayland EGL
+#          (mirrors the Debian trixie reference integration).
+# mali:    GDM + GNOME on X11, Rockchip Xorg + Mutter GLES2 via Mali X11 EGL.
+# software: GDM + GNOME on X11 with Mesa llvmpipe.
+set -euo pipefail
+usage()
+{
+    echo "Usage: rk3588-desktop-renderer wayland|mali|software (as root) | rk3588-desktop-renderer status"
+}
+mode=${1:-status}
+case "$mode" in
+    status)
+        printf 'Configured renderer (next login): '
+        cat /etc/rockchip-desktop-renderer 2>/dev/null || echo software
+        echo 'Check GLES in the desktop terminal: rk3588-render-env glmark2-es2'
+        exit 0 ;;
+    wayland|mali|software) ;;
+    *) usage >&2; exit 1 ;;
+esac
+[[ $# == 1 && $EUID == 0 ]] || { usage >&2; exit 1; }
+if [[ "$mode" != software ]]; then
+    [[ -r /opt/rockchip/mali/libEGL.so.1 &&
+       -r /opt/rockchip/mali/libGLESv2.so.2 &&
+       -r /opt/rockchip/mali/libgbm.so.1 ]] || {
+        echo "Mali backend is not installed; rebuild Desktop with UBUNTU_DESKTOP_GPU=wayland|mali." >&2
+        exit 1
+    }
+fi
+if [[ "$mode" == mali ]]; then
+    [[ -x /opt/rockchip/xserver/bin/Xorg && -x /usr/bin/Xorg.distrib ]] || {
+        echo "Rockchip Xorg is not installed; rebuild Desktop with UBUNTU_DESKTOP_GPU=mali." >&2
+        exit 1
+    }
+fi
+
+mkdir -p /etc/X11/xorg.conf.d /etc/systemd/system/gdm.service.d
+case "$mode" in
+    software) accel=none ;;
+    *) accel=glamor ;;
+esac
+# Only meaningful to an Xorg/X11 session; harmless under Wayland (Xwayland
+# does not read this Device section) and kept so a later switch is complete.
+cat > /etc/X11/xorg.conf.d/20-rockchip-modesetting.conf <<XORG
+Section "Device"
+    Identifier "Rockchip Display"
+    Driver "modesetting"
+    Option "AccelMethod" "$accel"
+    Option "DRI" "2"
+    Option "SWcursor" "true"
+EndSection
+XORG
+
+# EnvironmentFile is read again on every GDM start (covers the greeter,
+# which is itself a Wayland compositor in the wayland mode). PAM covers the
+# user sessions; the Shell wrapper additionally covers systemd activation.
+case "$mode" in
+    wayland)
+        cat > /etc/rockchip-renderer.env <<'ENV'
+LD_LIBRARY_PATH=/opt/rockchip/mali
+MALI_DEFAULT_DISPLAY=wayland
+COGL_DRIVER=gles2
+ENV
+        ;;
+    mali)
+        cat > /etc/rockchip-renderer.env <<'ENV'
+LD_LIBRARY_PATH=/opt/rockchip/mali
+MALI_DEFAULT_DISPLAY=x11
+COGL_DRIVER=gles2
+COGL_RENDERER=EGL_XLIB
+ENV
+        ;;
+    software)
+        cat > /etc/rockchip-renderer.env <<'ENV'
+LIBGL_ALWAYS_SOFTWARE=1
+GALLIUM_DRIVER=llvmpipe
+ENV
+        ;;
+esac
+cat > /etc/systemd/system/gdm.service.d/20-rockchip-renderer.conf <<'UNIT'
+[Service]
+EnvironmentFile=/etc/rockchip-renderer.env
+UNIT
+
+# Select the display protocol and default session for GDM and AccountsService.
+if [[ "$mode" == wayland ]]; then
+    wayland=true
+    session=ubuntu-wayland
+else
+    wayland=false
+    session=ubuntu
+fi
+mkdir -p /etc/gdm3
+cat > /etc/gdm3/custom.conf <<GDM
+[daemon]
+WaylandEnable=$wayland
+DefaultSession=$session.desktop
+GDM
+mkdir -p /var/lib/AccountsService/users
+user_file=/var/lib/AccountsService/users/tboard
+if [[ -f "$user_file" ]]; then
+    sed -i -E "s/^(Session=).*/\1${session}/" "$user_file"
+fi
+
+touch /etc/environment
+sed -i -E '/^[[:space:]]*(LD_LIBRARY_PATH|LIBGL_ALWAYS_SOFTWARE|GALLIUM_DRIVER|COGL_DRIVER|COGL_RENDERER|MALI_DEFAULT_DISPLAY)=/d' /etc/environment
+cat /etc/rockchip-renderer.env >> /etc/environment
+printf '%s\n' "$mode" > /etc/rockchip-desktop-renderer
+echo "Selected $mode for the next login. Save desktop work, then reboot from serial."

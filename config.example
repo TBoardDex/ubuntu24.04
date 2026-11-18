@@ -1,0 +1,8 @@
+# Copy to config.local before building (sourced as a shell script).
+# Default accounts: root/root and tboard/tboard; serial/SSH require passwords.
+UBUNTU_CONSOLE=ttyFIQ0
+# Ubuntu 24.04 (noble); server is the default flavor.
+# wayland = GDM/GNOME on Wayland with Mali GLES (Debian trixie reference stack);
+# mali = Rockchip Xorg on X11 with Mali GLES; software = stock Xorg/Mesa llvmpipe.
+UBUNTU_DESKTOP_GPU=wayland
+# UBUNTU_HOSTNAME=TBoard-R5A
